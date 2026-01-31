@@ -7,19 +7,20 @@ from telegram.ext import ContextTypes
 from database.db import (
     create_bet, update_bet_step2, update_bet_step3, get_bet, 
     get_active_bets, get_bets_last_24h, take_bet, set_bet_result,
-    cancel_bet
+    cancel_bet, update_bet_name
 )
 from models.bet import Bet, STATUS_DRAFT, STATUS_OPEN, STATUS_TAKEN
 from config import is_allowed_player, get_other_player, get_taker_user_id, PLAYER_INZAAA_USERNAME, PLAYER_TROOLZ_USERNAME
+from constants import PLAYERS, BET_NAMES
 from datetime import datetime
 
 
 # Хранилище временных данных для визарда
-user_states = {}  # {user_id: {'action': 'step1'|'step2'|'step3', 'bet_id': int, 'playerA': str, 'playerB': str, 'oddsA': float, 'oddsB': float, 'message_id': int}}
+user_states = {}  # {user_id: {'action': 'step0'|'step1'|'step2'|'step3', 'bet_id': int, 'bet_name': str, 'playerA': str, 'playerB': str, 'oddsA': float, 'oddsB': float, 'message_id': int}}
 
 
 async def create_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик создания пари (шаг 1)"""
+    """Обработчик создания пари (шаг 0 - название пари)"""
     user = update.effective_user
     
     # Проверка доступа
@@ -39,30 +40,32 @@ async def create_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except:
             pass
     
+    # Создаем кнопки с готовыми названиями
+    keyboard = [[InlineKeyboardButton(name, callback_data=f"betname_{name}")] for name in BET_NAMES]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     # Обрабатываем как callback_query или message
     if update.callback_query:
         # Если это callback_query, редактируем существующее сообщение
         await update.callback_query.edit_message_text(
-            "Шаг 1/3 — Матч\n\n"
-            "Введи матч в формате:\n"
-            "`inz vs troolz`\n\n"
-            "Допустимый разделитель: `vs`",
-            parse_mode='Markdown'
+            "Шаг 0/4 — Название пари\n\n"
+            "Введи название пари или выбери из кнопок:",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
         )
         msg = update.callback_query.message
     else:
         # Если это обычное сообщение
         msg = await update.message.reply_text(
-            "Шаг 1/3 — Матч\n\n"
-            "Введи матч в формате:\n"
-            "`inz vs troolz`\n\n"
-            "Допустимый разделитель: `vs`",
-            parse_mode='Markdown'
+            "Шаг 0/4 — Название пари\n\n"
+            "Введи название пари или выбери из кнопок:",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
         )
     
     # Сохраняем состояние
     user_states[user.id] = {
-        'action': 'step1',
+        'action': 'step0',
         'message_id': msg.message_id
     }
 
@@ -81,10 +84,57 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     state = user_states[user.id]
     
-    if state['action'] == 'step1':
-        # Парсим матч
-        match_pattern = r'^(.+?)\s+vs\s+(.+?)$'
-        match = re.match(match_pattern, text, re.IGNORECASE)
+    if state['action'] == 'step0':
+        # Шаг 0: Название пари
+        bet_name = text
+        
+        # Удаляем сообщение пользователя
+        try:
+            await update.message.delete()
+        except:
+            pass
+        
+        # Создаем кнопки с игроками (по 2 в ряд)
+        keyboard = []
+        for i in range(0, len(PLAYERS), 2):
+            row = []
+            row.append(InlineKeyboardButton(PLAYERS[i], callback_data=f"player_{PLAYERS[i]}"))
+            if i + 1 < len(PLAYERS):
+                row.append(InlineKeyboardButton(PLAYERS[i + 1], callback_data=f"player_{PLAYERS[i + 1]}"))
+            keyboard.append(row)
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Переходим к шагу 1 - выбор матча
+        msg = await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=state.get('message_id'),
+            text=f"Шаг 1/4 — Матч\n\n"
+                 f"Название: {bet_name}\n\n"
+                 f"Введи матч в формате:\n"
+                 f"`inz vs troolz` или `inz troolz`\n\n"
+                 f"Допустимые разделители: `vs`, пробел\n\n"
+                 f"Или выбери игроков из кнопок:",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        
+        user_states[user.id] = {
+            'action': 'step1',
+            'bet_name': bet_name,
+            'message_id': msg.message_id,
+            'selected_playerA': None,  # Для выбора через кнопки
+            'selected_playerB': None
+        }
+    
+    elif state['action'] == 'step1':
+        # Парсим матч - поддерживаем разделители "vs" и пробел
+        match_pattern_vs = r'^(.+?)\s+vs\s+(.+?)$'
+        match_pattern_space = r'^(\S+)\s+(\S+)$'
+        
+        match = re.match(match_pattern_vs, text, re.IGNORECASE)
+        if not match:
+            match = re.match(match_pattern_space, text, re.IGNORECASE)
         
         # Удаляем сообщение пользователя
         try:
@@ -93,13 +143,26 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             pass
         
         if not match:
+            # Воссоздаем кнопки с игроками
+            keyboard = []
+            for i in range(0, len(PLAYERS), 2):
+                row = []
+                row.append(InlineKeyboardButton(PLAYERS[i], callback_data=f"player_{PLAYERS[i]}"))
+                if i + 1 < len(PLAYERS):
+                    row.append(InlineKeyboardButton(PLAYERS[i + 1], callback_data=f"player_{PLAYERS[i + 1]}"))
+                keyboard.append(row)
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=state.get('message_id'),
                 text="❌ Неверный формат! Используй формат:\n"
-                     "`команда1 vs команда2`\n\n"
-                     "Например: `inz vs troolz`",
-                parse_mode='Markdown'
+                     "`команда1 vs команда2` или `команда1 команда2`\n\n"
+                     "Например: `inz vs troolz` или `inz troolz`\n\n"
+                     "Или выбери игроков из кнопок:",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
             )
             return
         
@@ -113,6 +176,7 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             maker_username=user.username or user.first_name,
             taker_user_id=None,
             taker_username=get_other_player(user.username),
+            bet_name=state.get('bet_name'),
             playerA_name=playerA,
             playerB_name=playerB,
             oddsA=None,
@@ -130,31 +194,31 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         msg = await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=state.get('message_id'),
-            text=f"Шаг 2/3 — Коэффициенты\n\n"
-                 f"Матч:\n"
-                 f"{playerA} vs {playerB}\n\n"
-                 f"Введи коэффициенты В ЭТОМ ПОРЯДКЕ:\n"
-                 f"{playerA} → коэффициент\n"
-                 f"{playerB} → коэффициент\n\n"
+            text=f"Шаг 2/4 — Проценты и коэффициенты\n\n"
+                 f"Название: {state.get('bet_name')}\n"
+                 f"Матч: {playerA} vs {playerB}\n\n"
+                 f"Введи вероятность победы одного из игроков в формате:\n"
+                 f"`Имя_игрока процент`\n\n"
                  f"Пример:\n"
-                 f"`1.50 2.40`",
+                 f"`{playerA} 60` — {playerA} побеждает с вероятностью 60%\n\n"
+                 f"Второму игроку автоматически присвоится {100}%\n"
+                 f"Коэффициенты будут рассчитаны автоматически.",
             parse_mode='Markdown'
         )
         
         user_states[user.id] = {
             'action': 'step2',
             'bet_id': bet_id,
+            'bet_name': state.get('bet_name'),
             'playerA': playerA,
             'playerB': playerB,
             'message_id': msg.message_id
         }
     
     elif state['action'] == 'step2' or state['action'] == 'edit_step2':
-        # Парсим коэффициенты
+        # Парсим формат "Имя процент"
         # Заменяем запятые на точки
         text = text.replace(',', '.')
-        odds_pattern = r'^(\d+\.?\d*)\s+(\d+\.?\d*)$'
-        match = re.match(odds_pattern, text)
         
         # Удаляем сообщение пользователя
         try:
@@ -162,28 +226,56 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except:
             pass
         
+        # Парсим формат "Имя процент"
+        percent_pattern = r'^(.+?)\s+(\d+\.?\d*)$'
+        match = re.match(percent_pattern, text.strip())
+        
         if not match:
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=state.get('message_id'),
-                text="❌ Неверный формат! Введи два числа через пробел:\n"
-                     "`коэффициент1 коэффициент2`\n\n"
-                     "Пример: `1.50 2.40`",
+                text="❌ Неверный формат! Введи имя игрока и процент:\n"
+                     f"`{state['playerA']} процент` или `{state['playerB']} процент`\n\n"
+                     f"Пример: `{state['playerA']} 60`",
                 parse_mode='Markdown'
             )
             return
         
+        player_name = match.group(1).strip()
         try:
-            oddsA = float(match.group(1))
-            oddsB = float(match.group(2))
+            percent = float(match.group(2))
             
-            if oddsA <= 0 or oddsB <= 0:
+            if percent <= 0 or percent >= 100:
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id,
                     message_id=state.get('message_id'),
-                    text="❌ Коэффициенты должны быть положительными числами!"
+                    text="❌ Процент должен быть от 0 до 100!"
                 )
                 return
+            
+            # Определяем, для какого игрока указан процент
+            playerA = state['playerA']
+            playerB = state['playerB']
+            
+            if player_name.lower() == playerA.lower():
+                percentA = percent
+                percentB = 100 - percent
+            elif player_name.lower() == playerB.lower():
+                percentB = percent
+                percentA = 100 - percent
+            else:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=state.get('message_id'),
+                    text=f"❌ Неизвестное имя игрока!\n"
+                         f"Используй: `{playerA}` или `{playerB}`",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Вычисляем коэффициенты: коэф = 100 / процент
+            oddsA = round(100 / percentA, 2)
+            oddsB = round(100 / percentB, 2)
             
             # Обновляем коэффициенты
             update_bet_step2(state['bet_id'], oddsA, oddsB)
@@ -205,12 +297,12 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             msg = await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=state.get('message_id'),
-                text=f"Шаг 3/3 — Сумма ставки\n\n"
-                     f"Матч:\n"
-                     f"{state['playerA']} vs {state['playerB']}\n\n"
-                     f"Коэффициенты:\n"
-                     f"{state['playerA']:15} — {oddsA:.2f}\n"
-                     f"{state['playerB']:15} — {oddsB:.2f}\n\n"
+                text=f"Шаг 3/4 — Сумма ставки\n\n"
+                     f"Название: {state.get('bet_name')}\n"
+                     f"Матч: {state['playerA']} vs {state['playerB']}\n\n"
+                     f"Проценты и коэффициенты:\n"
+                     f"{state['playerA']:15} — {percentA:.0f}% → {oddsA:.2f}\n"
+                     f"{state['playerB']:15} — {percentB:.0f}% → {oddsB:.2f}\n\n"
                      f"Введи сумму ставки (₽) или выбери из кнопок:",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
@@ -222,10 +314,13 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             user_states[user.id] = {
                 'action': next_action,
                 'bet_id': state['bet_id'],
+                'bet_name': state.get('bet_name'),
                 'playerA': state['playerA'],
                 'playerB': state['playerB'],
                 'oddsA': oddsA,
                 'oddsB': oddsB,
+                'percentA': percentA,
+                'percentB': percentB,
                 'message_id': msg.message_id
             }
             
@@ -324,6 +419,10 @@ def format_bet_card(bet: Bet) -> str:
     }.get(bet.status, '❓')
     
     text = f"{status_emoji} Пари #{bet.id}\n\n"
+    
+    if bet.bet_name:
+        text += f"Название: {bet.bet_name}\n"
+    
     text += f"Матч: {bet.playerA_name} vs {bet.playerB_name}\n"
     
     if bet.oddsA and bet.oddsB:
@@ -343,8 +442,16 @@ def format_bet_card(bet: Bet) -> str:
         text += f"Статус: TAKEN (ожидает результат)"
     elif bet.status == 'FINISHED':
         result_text = bet.playerA_name if bet.result == 'A' else (bet.playerB_name if bet.result == 'B' else 'VOID')
+        
+        # Определяем, кто на какую сторону поставил
+        taker_choice = bet.playerA_name if bet.taker_side == 'A' else bet.playerB_name
+        maker_choice = bet.playerB_name if bet.taker_side == 'A' else bet.playerA_name
+        
         text += f"\n✅ Пари завершено\n"
         text += f"Победил: {result_text}\n\n"
+        text += f"Ставки:\n"
+        text += f"@{bet.maker_username} → {maker_choice}\n"
+        text += f"@{bet.taker_username} → {taker_choice}\n\n"
         text += f"Итог:\n"
         text += f"@{bet.maker_username} {bet.maker_win:+.2f} ₽\n"
         text += f"@{bet.taker_username} {bet.taker_win:+.2f} ₽\n"
@@ -355,25 +462,135 @@ def format_bet_card(bet: Bet) -> str:
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик callback-запросов"""
     query = update.callback_query
-    
-    # #region agent log
-    import json
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bet_handlers.py:callback_handler","message":"entry","data":{"callback_data":query.data if query else None},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
-    await query.answer()
-    
     user = update.effective_user
     data = query.data
     
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"bet_handlers.py:callback_handler","message":"processing callback","data":{"data":data,"user_id":user.id,"username":user.username},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
+    if data.startswith('betname_'):
+        # Выбор названия пари через кнопку
+        bet_name = data.split('_', 1)[1]
+        
+        if user.id not in user_states or user_states[user.id]['action'] != 'step0':
+            await query.answer("❌ Сессия создания пари истекла. Начните заново.", show_alert=True)
+            return
+        
+        # Создаем кнопки с игроками (по 2 в ряд)
+        keyboard = []
+        for i in range(0, len(PLAYERS), 2):
+            row = []
+            row.append(InlineKeyboardButton(PLAYERS[i], callback_data=f"player_{PLAYERS[i]}"))
+            if i + 1 < len(PLAYERS):
+                row.append(InlineKeyboardButton(PLAYERS[i + 1], callback_data=f"player_{PLAYERS[i + 1]}"))
+            keyboard.append(row)
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Переходим к шагу 1
+        await query.edit_message_text(
+            f"Шаг 1/4 — Матч\n\n"
+            f"Название: {bet_name}\n\n"
+            f"Введи матч в формате:\n"
+            f"`inz vs troolz` или `inz troolz`\n\n"
+            f"Допустимые разделители: `vs`, пробел\n\n"
+            f"Или выбери игроков из кнопок:",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        
+        user_states[user.id] = {
+            'action': 'step1',
+            'bet_name': bet_name,
+            'message_id': query.message.message_id,
+            'selected_playerA': None,
+            'selected_playerB': None
+        }
     
-    if data.startswith('menu_'):
+    elif data.startswith('player_'):
+        # Выбор игрока через кнопку
+        player_name = data.split('_', 1)[1]
+        
+        if user.id not in user_states or user_states[user.id]['action'] != 'step1':
+            await query.answer("❌ Сессия создания пари истекла. Начните заново.", show_alert=True)
+            return
+        
+        state = user_states[user.id]
+        
+        # Если первый игрок еще не выбран
+        if state.get('selected_playerA') is None:
+            state['selected_playerA'] = player_name
+            await query.answer(f"Выбран первый игрок: {player_name}")
+            
+            # Обновляем сообщение
+            keyboard = []
+            for i in range(0, len(PLAYERS), 2):
+                row = []
+                row.append(InlineKeyboardButton(PLAYERS[i], callback_data=f"player_{PLAYERS[i]}"))
+                if i + 1 < len(PLAYERS):
+                    row.append(InlineKeyboardButton(PLAYERS[i + 1], callback_data=f"player_{PLAYERS[i + 1]}"))
+                keyboard.append(row)
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                f"Шаг 1/4 — Матч\n\n"
+                f"Название: {state['bet_name']}\n\n"
+                f"Первый игрок: {player_name}\n"
+                f"Выбери второго игрока:",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        # Если первый игрок уже выбран, выбираем второго
+        else:
+            await query.answer()
+            playerA = state['selected_playerA']
+            playerB = player_name
+            
+            # Создаем пари в статусе DRAFT
+            new_bet = Bet(
+                id=None,
+                maker_user_id=user.id,
+                maker_username=user.username or user.first_name,
+                taker_user_id=None,
+                taker_username=get_other_player(user.username),
+                bet_name=state.get('bet_name'),
+                playerA_name=playerA,
+                playerB_name=playerB,
+                oddsA=None,
+                oddsB=None,
+                stake=None,
+                status=STATUS_DRAFT,
+                taker_side=None,
+                result=None,
+                created_at=datetime.now()
+            )
+            
+            bet_id = create_bet(new_bet)
+            
+            # Переходим к шагу 2
+            msg = await query.edit_message_text(
+                f"Шаг 2/4 — Проценты и коэффициенты\n\n"
+                f"Название: {state.get('bet_name')}\n"
+                f"Матч: {playerA} vs {playerB}\n\n"
+                f"Введи вероятность победы одного из игроков в формате:\n"
+                f"`Имя_игрока процент`\n\n"
+                f"Пример:\n"
+                f"`{playerA} 60` — {playerA} побеждает с вероятностью 60%\n\n"
+                f"Второму игроку автоматически присвоится остаток\n"
+                f"Коэффициенты будут рассчитаны автоматически.",
+                parse_mode='Markdown'
+            )
+            
+            user_states[user.id] = {
+                'action': 'step2',
+                'bet_id': bet_id,
+                'bet_name': state.get('bet_name'),
+                'playerA': playerA,
+                'playerB': playerB,
+                'message_id': msg.message_id
+            }
+    
+    elif data.startswith('menu_'):
         # Обработка меню
+        await query.answer()
         menu_action = data.split('_', 1)[1]
         
         if menu_action == 'create_bet':
@@ -396,40 +613,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_take_bet(update, context, bet_id)
     
     elif data.startswith('side_'):
-        # Выбор стороны
-        # #region agent log
-        import json
-        with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bet_handlers.py:372","message":"side_ callback","data":{"callback_data":data},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        # #endregion
-        
+        # Выбор стороны        
         parts = data.split('_')
-        # #region agent log
-        with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"bet_handlers.py:378","message":"parsed parts","data":{"parts":parts,"len":len(parts)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        # #endregion
         
         # Формат: side_{bet_id}_{side}
         if len(parts) >= 3:
             bet_id = int(parts[1])
             side = parts[2]  # 'A' или 'B'
         else:
-            # #region agent log
-            with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"bet_handlers.py:385","message":"invalid format","data":{"parts":parts},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-            # #endregion
             await query.answer("❌ Ошибка формата callback", show_alert=True)
             return
         
-        await handle_select_side(update, context, bet_id, side)
+        try:
+            await handle_select_side(update, context, bet_id, side)
+        except Exception as e:
+            raise
     
     elif data.startswith('result_menu_'):
         # Меню выбора результата
+        await query.answer()
         bet_id = int(data.split('_')[2])
         await show_result_menu(update, context, bet_id)
     
     elif data.startswith('result_'):
         # Проставление результата
+        await query.answer()
         parts = data.split('_')
         bet_id = int(parts[1])
         result = parts[2]  # 'A', 'B', 'VOID'
@@ -437,26 +645,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == 'reset_confirm':
         # Подтверждение сброса статистики
+        await query.answer()
         from database.db import reset_statistics
         reset_statistics()
         await query.edit_message_text(
             "✅ Статистика успешно сброшена!\n\n"
-            "Период начинается с текущей даты.",
-            parse_mode='Markdown'
+            "Период начинается с текущей даты."
         )
     
     elif data.startswith('stats_'):
         # Фильтр статистики по периоду
+        await query.answer()
         period = data.split('_')[1]
         await show_statistics_by_period(update, context, period)
     
     elif data.startswith('cancel_'):
         # Отмена пари
+        await query.answer()
         bet_id = int(data.split('_')[1])
         await handle_cancel_bet(update, context, bet_id)
     
     elif data.startswith('stake_'):
         # Выбор готовой суммы ставки
+        await query.answer()
         parts = data.split('_')
         bet_id = int(parts[1])
         stake = float(parts[2])
@@ -464,12 +675,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data.startswith('edit_'):
         # Редактирование пари
-        # #region agent log
-        import json
-        with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bet_handlers.py:callback_handler","message":"edit_ callback","data":{"callback_data":data},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        # #endregion
-        
         bet_id = int(data.split('_')[1])
         await handle_edit_bet(update, context, bet_id)
 
@@ -479,74 +684,25 @@ async def handle_take_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, be
     query = update.callback_query
     user = update.effective_user
     
-    # #region agent log
-    import json
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bet_handlers.py:handle_take_bet","message":"entry","data":{"bet_id":bet_id,"user_id":user.id,"username":user.username},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
     bet = get_bet(bet_id)
     if not bet:
         await query.edit_message_text("❌ Пари не найдено!")
         return
     
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"bet_handlers.py:handle_take_bet","message":"bet found","data":{"bet_status":bet.status,"taker_username":bet.taker_username,"user_username":user.username},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
     # Проверка доступа
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"bet_handlers.py:handle_take_bet","message":"before access check","data":{"is_allowed":is_allowed_player(user.username),"user_username":user.username},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
     if not is_allowed_player(user.username):
-        # #region agent log
-        with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"bet_handlers.py:handle_take_bet","message":"access denied - not allowed player","data":{},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        # #endregion
         await query.answer("❌ Выбор стороны доступен только второму игроку", show_alert=True)
         return
     
     # Проверка, что пользователь - taker
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"bet_handlers.py:handle_take_bet","message":"before taker check","data":{"user_username":user.username,"taker_username":bet.taker_username,"match":user.username and user.username.lower() == bet.taker_username.lower()},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
     from config import TEST_MODE
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"bet_handlers.py:handle_take_bet","message":"TEST_MODE check","data":{"TEST_MODE":TEST_MODE,"user_username":user.username,"taker_username":bet.taker_username,"match":user.username and user.username.lower() == bet.taker_username.lower()},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
     if not TEST_MODE and (not user.username or user.username.lower() != bet.taker_username.lower()):
-        # #region agent log
-        with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"bet_handlers.py:handle_take_bet","message":"access denied - not taker, showing alert","data":{},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        # #endregion
-        try:
-            await query.answer("❌ Выбор стороны доступен только второму игроку", show_alert=True)
-        except Exception as e:
-            # #region agent log
-            with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"bet_handlers.py:handle_take_bet","message":"error showing alert","data":{"error":str(e)},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-            # #endregion
+        await query.answer("❌ Выбор стороны доступен только второму игроку", show_alert=True)
         return
     
     if bet.status != STATUS_OPEN:
-        # #region agent log
-        with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"bet_handlers.py:handle_take_bet","message":"status check failed","data":{"bet_status":bet.status},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        # #endregion
         await query.answer("❌ Пари уже принято или отменено", show_alert=True)
         return
-    
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"F","location":"bet_handlers.py:handle_take_bet","message":"all checks passed, showing buttons","data":{},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
     
     # Показываем кнопки выбора стороны
     keyboard = [
@@ -568,7 +724,7 @@ async def handle_take_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, be
     
     await query.edit_message_text(
         f"Выбери сторону для ставки:\n\n"
-        f"**{bet.playerA_name}** vs **{bet.playerB_name}**\n"
+        f"*{bet.playerA_name}* vs *{bet.playerB_name}*\n"
         f"Коэффициенты: {bet.oddsA:.2f} / {bet.oddsB:.2f}\n"
         f"Сумма: {bet.stake:.2f} ₽",
         reply_markup=reply_markup,
@@ -581,66 +737,27 @@ async def handle_select_side(update: Update, context: ContextTypes.DEFAULT_TYPE,
     query = update.callback_query
     user = update.effective_user
     
-    # #region agent log
-    import json
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bet_handlers.py:handle_select_side","message":"entry","data":{"bet_id":bet_id,"side":side,"user_id":user.id,"username":user.username},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
     bet = get_bet(bet_id)
     if not bet:
         await query.edit_message_text("❌ Пари не найдено!")
         return
     
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"bet_handlers.py:handle_select_side","message":"bet found","data":{"bet_status":bet.status,"taker_username":bet.taker_username,"user_username":user.username},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
     # Проверка доступа
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"bet_handlers.py:handle_select_side","message":"before access check","data":{"user_username":user.username,"taker_username":bet.taker_username,"match":user.username and user.username.lower() == bet.taker_username.lower()},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
     # В тестовом режиме разрешаем maker также быть taker
     from config import TEST_MODE
     if not TEST_MODE and (not user.username or user.username.lower() != bet.taker_username.lower()):
-        # #region agent log
-        with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"bet_handlers.py:handle_select_side","message":"access denied","data":{"reason":"username_mismatch"},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        # #endregion
         await query.answer("❌ Выбор стороны доступен только второму игроку", show_alert=True)
         return
     
     # Проверка статуса
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"bet_handlers.py:handle_select_side","message":"before status check","data":{"bet_status":bet.status,"required_status":"OPEN"},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
     if bet.status != STATUS_OPEN:
-        # #region agent log
-        with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"bet_handlers.py:handle_select_side","message":"status check failed","data":{"bet_status":bet.status},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        # #endregion
         await query.answer("❌ Пари уже принято или отменено", show_alert=True)
         return
-    
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"bet_handlers.py:handle_select_side","message":"before take_bet","data":{"bet_id":bet_id,"user_id":user.id,"side":side},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
     
     # Принимаем пари
     from database.db import update_taker_user_id
     update_taker_user_id(bet_id, user.id)
     take_bet(bet_id, user.id, side)
-    
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"bet_handlers.py:handle_select_side","message":"after take_bet","data":{"bet_id":bet_id},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
     
     # Обновляем пари
     bet = get_bet(bet_id)
@@ -659,7 +776,10 @@ async def handle_select_side(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(card_text, reply_markup=reply_markup, parse_mode='Markdown')
+    try:
+        await query.edit_message_text(card_text, reply_markup=reply_markup, parse_mode='Markdown')
+    except Exception as e:
+        raise
 
 
 async def show_result_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, bet_id: int):
@@ -693,15 +813,29 @@ async def show_result_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, b
         ]
     ]
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = InlineKeyboardMarkup(keyboard)    
+    # Экранируем специальные markdown-символы в именах
+    def escape_markdown(text):
+        """Экранирует специальные символы для Markdown"""
+        special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        return text
     
-    await query.edit_message_text(
-        f"Выбери результат пари:\n\n"
-        f"**{bet.playerA_name}** vs **{bet.playerB_name}**\n"
-        f"Выбрано: {bet.playerA_name if bet.taker_side == 'A' else bet.playerB_name}",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
+    playerA_escaped = escape_markdown(bet.playerA_name)
+    playerB_escaped = escape_markdown(bet.playerB_name)
+    taker_choice_escaped = escape_markdown(bet.playerA_name if bet.taker_side == 'A' else bet.playerB_name)
+    
+    try:
+        await query.edit_message_text(
+            f"Выбери результат пари:\n\n"
+            f"*{playerA_escaped}* vs *{playerB_escaped}*\n"
+            f"Выбрано: {taker_choice_escaped}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        raise
 
 
 async def handle_set_result(update: Update, context: ContextTypes.DEFAULT_TYPE, bet_id: int, result: str):
@@ -757,14 +891,14 @@ async def show_statistics_by_period(update: Update, context: ContextTypes.DEFAUL
     
     stats = get_all_statistics(start_date, now)
     
-    text = f"📊 **Статистика**\n\n"
+    text = f"📊 *Статистика*\n\n"
     text += f"Период: {period_text}\n\n"
     
     if start_date:
         text += f"С {start_date.strftime('%d.%m.%Y')} по {now.strftime('%d.%m.%Y')}\n\n"
     
     for username, user_stats in stats.items():
-        text += f"**@{username}**\n"
+        text += f"*@{username}*\n"
         text += f"Баланс: {user_stats['total_balance']:.2f} ₽\n"
         text += f"Пари: {user_stats['total_bets']}\n"
         text += f"Победы: {user_stats['wins']} | Поражения: {user_stats['losses']}\n\n"
@@ -793,69 +927,51 @@ async def handle_edit_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, be
     query = update.callback_query
     user = update.effective_user
     
-    # #region agent log
-    import json
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"bet_handlers.py:handle_edit_bet","message":"entry","data":{"bet_id":bet_id,"user_id":user.id,"username":user.username},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
     bet = get_bet(bet_id)
     if not bet:
         await query.edit_message_text("❌ Пари не найдено!")
         return
     
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B","location":"bet_handlers.py:handle_edit_bet","message":"bet found","data":{"bet_status":bet.status,"maker_username":bet.maker_username,"user_username":user.username},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
-    
     # Проверка доступа - только maker может редактировать
     if not user.username or user.username.lower() != bet.maker_username.lower():
-        # #region agent log
-        with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"bet_handlers.py:handle_edit_bet","message":"access denied - not maker","data":{},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        # #endregion
         await query.answer("❌ Только создатель может редактировать пари", show_alert=True)
         return
     
     # Проверка статуса - можно редактировать только OPEN пари
     if bet.status != STATUS_OPEN:
-        # #region agent log
-        with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"bet_handlers.py:handle_edit_bet","message":"status check failed","data":{"bet_status":bet.status},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-        # #endregion
         await query.answer("❌ Можно редактировать только открытое пари", show_alert=True)
         return
-    
-    # #region agent log
-    with open(r'c:\Users\AZ\telegram_bet_bot\.cursor\debug.log', 'a', encoding='utf-8') as f:
-        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"E","location":"bet_handlers.py:handle_edit_bet","message":"starting edit wizard","data":{"bet_id":bet_id},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-    # #endregion
     
     # Начинаем визард редактирования с шага 2 (коэффициенты)
     # Сохраняем состояние для редактирования
     user_states[user.id] = {
         'action': 'edit_step2',
         'bet_id': bet_id,
+        'bet_name': bet.bet_name,
         'playerA': bet.playerA_name,
         'playerB': bet.playerB_name,
         'message_id': query.message.message_id
     }
     
     # Показываем шаг 2 - редактирование коэффициентов
+    bet_name_text = f"Название: {bet.bet_name}\n" if bet.bet_name else ""
+    
+    # Вычисляем текущие проценты из коэффициентов (обратная формула)
+    current_percentA = round(100 / bet.oddsA, 1) if bet.oddsA else 50
+    current_percentB = round(100 / bet.oddsB, 1) if bet.oddsB else 50
+    
     await query.edit_message_text(
         f"✏️ Редактирование пари #{bet_id}\n\n"
-        f"Шаг 2/3 — Коэффициенты\n\n"
-        f"Матч:\n"
-        f"{bet.playerA_name} vs {bet.playerB_name}\n\n"
-        f"Текущие коэффициенты:\n"
-        f"{bet.playerA_name} — {bet.oddsA:.2f}\n"
-        f"{bet.playerB_name} — {bet.oddsB:.2f}\n\n"
-        f"Введи новые коэффициенты В ЭТОМ ПОРЯДКЕ:\n"
-        f"{bet.playerA_name} → коэффициент\n"
-        f"{bet.playerB_name} → коэффициент\n\n"
+        f"Шаг 2/4 — Проценты и коэффициенты\n\n"
+        f"{bet_name_text}"
+        f"Матч: {bet.playerA_name} vs {bet.playerB_name}\n\n"
+        f"Текущие значения:\n"
+        f"{bet.playerA_name} — {current_percentA:.0f}% → {bet.oddsA:.2f}\n"
+        f"{bet.playerB_name} — {current_percentB:.0f}% → {bet.oddsB:.2f}\n\n"
+        f"Введи новую вероятность победы в формате:\n"
+        f"`Имя_игрока процент`\n\n"
         f"Пример:\n"
-        f"`1.50 2.40`",
+        f"`{bet.playerA_name} 60`",
         parse_mode='Markdown'
     )
 
@@ -958,7 +1074,7 @@ async def view_active_bets_handler(update: Update, context: ContextTypes.DEFAULT
     active_bets = get_active_bets()
     
     if not active_bets:
-        text = "📌 **Актуальные пари:**\n\nНет активных пари."
+        text = "📌 *Актуальные пари:*\n\nНет активных пари."
         if update.callback_query:
             keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="menu_back")]]
             await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -966,11 +1082,26 @@ async def view_active_bets_handler(update: Update, context: ContextTypes.DEFAULT
             await update.message.reply_text(text, parse_mode='Markdown')
         return
     
-    text = "📌 **Актуальные пари:**\n\n"
+    text = "📌 *Актуальные пари:*\n\n"
     
     for bet in active_bets:
         text += f"#{bet.id} — {bet.playerA_name} vs {bet.playerB_name}\n"
-        text += f"Статус: {bet.status}\n\n"
+        
+        # Для TAKEN пари показываем детали
+        if bet.status == 'TAKEN':
+            # Определяем, кто на какую сторону поставил
+            taker_choice = bet.playerA_name if bet.taker_side == 'A' else bet.playerB_name
+            maker_choice = bet.playerB_name if bet.taker_side == 'A' else bet.playerA_name
+            
+            text += f"Кэфы: {bet.playerA_name} {bet.oddsA:.2f} | {bet.playerB_name} {bet.oddsB:.2f}\n"
+            text += f"Сумма: {bet.stake:.2f} ₽\n"
+            text += f"Ставки: @{bet.maker_username} → {maker_choice} | @{bet.taker_username} → {taker_choice}\n"
+            text += f"Статус: TAKEN (ожидает результат)\n\n"
+        else:
+            # Для OPEN пари показываем только коэффициенты и сумму
+            text += f"Кэфы: {bet.playerA_name} {bet.oddsA:.2f} | {bet.playerB_name} {bet.oddsB:.2f}\n"
+            text += f"Сумма: {bet.stake:.2f} ₽\n"
+            text += f"Статус: {bet.status}\n\n"
     
     keyboard = []
     user = update.effective_user
@@ -1002,23 +1133,28 @@ async def view_active_bets_handler(update: Update, context: ContextTypes.DEFAULT
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
     else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        await update.message.reply_text(text, reply_markup=reply_markup)
 
 
 async def view_bets_24h_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Просмотр пари за сутки"""
-    bets = get_bets_last_24h()
-    
+    """Просмотр пари за сутки"""    
+    bets = get_bets_last_24h()    
     if not bets:
-        text = "🗓 **Пари за сутки:**\n\nНет завершенных пари за последние 24 часа."
+        text = "🗓 *Пари за сутки:*\n\nНет завершенных пари за последние 24 часа."
     else:
-        text = "🗓 **Пари за сутки:**\n\n"
+        text = "🗓 *Пари за сутки:*\n\n"
         for bet in bets:
             result_text = bet.playerA_name if bet.result == 'A' else (bet.playerB_name if bet.result == 'B' else 'VOID')
+            
+            # Определяем, кто на какую сторону поставил
+            taker_choice = bet.playerA_name if bet.taker_side == 'A' else bet.playerB_name
+            maker_choice = bet.playerB_name if bet.taker_side == 'A' else bet.playerA_name
+            
             text += f"#{bet.id} — {bet.playerA_name} vs {bet.playerB_name}\n"
             text += f"Результат: {result_text}\n"
+            text += f"Ставки: @{bet.maker_username} → {maker_choice} | @{bet.taker_username} → {taker_choice}\n"
             text += f"@{bet.maker_username} {bet.maker_win:+.2f} ₽ | @{bet.taker_username} {bet.taker_win:+.2f} ₽\n\n"
     
     keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="menu_back")]]
@@ -1038,11 +1174,11 @@ async def show_statistics_handler(update: Update, context: ContextTypes.DEFAULT_
     # Показываем статистику за все время
     stats = get_all_statistics()
     
-    text = "📊 **Статистика**\n\n"
+    text = "📊 *Статистика*\n\n"
     text += "Период: Все время\n\n"
     
     for username, user_stats in stats.items():
-        text += f"**@{username}**\n"
+        text += f"*@{username}*\n"
         text += f"Баланс: {user_stats['total_balance']:.2f} ₽\n"
         text += f"Пари: {user_stats['total_bets']}\n"
         text += f"Победы: {user_stats['wins']} | Поражения: {user_stats['losses']}\n\n"
@@ -1084,7 +1220,7 @@ async def reset_statistics_handler(update: Update, context: ContextTypes.DEFAULT
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
-        "⚠️ **Подтверждение сброса статистики**\n\n"
+        "⚠️ *Подтверждение сброса статистики*\n\n"
         "Вы уверены, что хотите сбросить всю статистику?\n"
         "Это действие нельзя отменить!",
         reply_markup=reply_markup,

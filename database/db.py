@@ -30,6 +30,7 @@ def init_db():
             maker_username TEXT NOT NULL,
             taker_user_id INTEGER,
             taker_username TEXT,
+            bet_name TEXT,
             playerA_name TEXT NOT NULL,
             playerB_name TEXT NOT NULL,
             oddsA REAL,
@@ -44,6 +45,13 @@ def init_db():
             taker_win REAL DEFAULT 0
         )
     ''')
+    
+    # Миграция: добавляем колонку bet_name, если она не существует
+    cursor.execute("PRAGMA table_info(bets)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if 'bet_name' not in columns:
+        cursor.execute('ALTER TABLE bets ADD COLUMN bet_name TEXT')
+        print("Добавлена колонка bet_name в таблицу bets")
     
     # Таблица ledger для учета балансов
     cursor.execute('''
@@ -77,11 +85,11 @@ def create_bet(bet: Bet) -> int:
     
     cursor.execute('''
         INSERT INTO bets 
-        (maker_user_id, maker_username, taker_user_id, taker_username, playerA_name, playerB_name,
+        (maker_user_id, maker_username, taker_user_id, taker_username, bet_name, playerA_name, playerB_name,
          oddsA, oddsB, stake, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
-        bet.maker_user_id, bet.maker_username, bet.taker_user_id, bet.taker_username,
+        bet.maker_user_id, bet.maker_username, bet.taker_user_id, bet.taker_username, bet.bet_name,
         bet.playerA_name, bet.playerB_name, bet.oddsA, bet.oddsB, bet.stake,
         bet.status, bet.created_at.isoformat()
     ))
@@ -97,6 +105,15 @@ def update_bet_step2(bet_id: int, oddsA: float, oddsB: float):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('UPDATE bets SET oddsA = ?, oddsB = ? WHERE id = ?', (oddsA, oddsB, bet_id))
+    conn.commit()
+    conn.close()
+
+
+def update_bet_name(bet_id: int, bet_name: str):
+    """Обновление названия пари"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE bets SET bet_name = ? WHERE id = ?', (bet_name, bet_id))
     conn.commit()
     conn.close()
 
@@ -347,33 +364,52 @@ def get_all_statistics(start_date: Optional[datetime] = None, end_date: Optional
     """Получение общей статистики для обоих игроков"""
     from config import PLAYER_INZAAA_USERNAME, PLAYER_TROOLZ_USERNAME
     
-    # Получаем ID игроков из bets (maker или taker)
+    # Получаем ID игроков из ledger (более надежный источник)
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Получаем все уникальные user_id и username из bets
+    # Получаем уникальные user_id и username из ledger с приоритетом последним записям
     cursor.execute('''
-        SELECT DISTINCT maker_user_id as user_id, maker_username as username FROM bets
-        UNION
-        SELECT DISTINCT taker_user_id as user_id, taker_username as username FROM bets
-        WHERE taker_user_id IS NOT NULL
-    ''')
+        SELECT user_id, username 
+        FROM ledger 
+        WHERE username IN (?, ?)
+        GROUP BY username
+        ORDER BY MAX(created_at) DESC
+    ''', (PLAYER_INZAAA_USERNAME, PLAYER_TROOLZ_USERNAME))
     
     users = {}
     for row in cursor.fetchall():
         username = row[1]
         user_id = row[0]
-        if username and username.lower() in [PLAYER_INZAAA_USERNAME.lower(), PLAYER_TROOLZ_USERNAME.lower()]:
+        if username and username not in users:
             users[username] = user_id
     
-    # Если не нашли в bets, ищем в ledger
+    # Если не нашли в ledger, ищем в bets
     if len(users) < 2:
-        cursor.execute('SELECT DISTINCT user_id, username FROM ledger WHERE username IN (?, ?)', 
-                       (PLAYER_INZAAA_USERNAME, PLAYER_TROOLZ_USERNAME))
+        # Сначала ищем как maker
+        cursor.execute('''
+            SELECT DISTINCT maker_user_id, maker_username 
+            FROM bets 
+            WHERE maker_username IN (?, ?)
+        ''', (PLAYER_INZAAA_USERNAME, PLAYER_TROOLZ_USERNAME))
+        
         for row in cursor.fetchall():
             username = row[1]
             user_id = row[0]
-            if username not in users:
+            if username and username not in users:
+                users[username] = user_id
+        
+        # Потом ищем как taker
+        cursor.execute('''
+            SELECT DISTINCT taker_user_id, taker_username 
+            FROM bets 
+            WHERE taker_username IN (?, ?) AND taker_user_id IS NOT NULL
+        ''', (PLAYER_INZAAA_USERNAME, PLAYER_TROOLZ_USERNAME))
+        
+        for row in cursor.fetchall():
+            username = row[1]
+            user_id = row[0]
+            if username and username not in users:
                 users[username] = user_id
     
     conn.close()

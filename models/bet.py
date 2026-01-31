@@ -28,6 +28,7 @@ class Bet:
     maker_username: str
     taker_user_id: Optional[int]  # ID второго игрока (Taker)
     taker_username: Optional[str]
+    bet_name: Optional[str]  # Название пари (BO1, BO3, BO5 или свободный текст)
     playerA_name: str  # Имя первого игрока из матча
     playerB_name: str  # Имя второго игрока из матча
     oddsA: Optional[float]  # Коэффициент для playerA
@@ -48,6 +49,7 @@ class Bet:
             'maker_username': self.maker_username,
             'taker_user_id': self.taker_user_id,
             'taker_username': self.taker_username,
+            'bet_name': self.bet_name,
             'playerA_name': self.playerA_name,
             'playerB_name': self.playerB_name,
             'oddsA': self.oddsA,
@@ -71,6 +73,7 @@ class Bet:
             maker_username=data['maker_username'],
             taker_user_id=data.get('taker_user_id'),
             taker_username=data.get('taker_username'),
+            bet_name=data.get('bet_name'),
             playerA_name=data['playerA_name'],
             playerB_name=data['playerB_name'],
             oddsA=data.get('oddsA'),

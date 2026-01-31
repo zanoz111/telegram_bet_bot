@@ -25,6 +25,18 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
 
+async def post_init(application: Application) -> None:
+    """Инициализация после запуска бота"""
+    # Устанавливаем команды бота для меню
+    from telegram import BotCommand
+    commands = [
+        BotCommand("start", "Главное меню"),
+        BotCommand("create_match", "Создать пари"),
+    ]
+    await application.bot.set_my_commands(commands)
+    logger.info("Команды бота установлены")
+
+
 def main():
     """Главная функция для запуска бота"""
     # Инициализация базы данных
@@ -41,7 +53,7 @@ def main():
         raise ValueError("BOT_TOKEN не найден! Создайте файл .env с BOT_TOKEN=your_token")
     
     # Создание приложения
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
     
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start_handler))
