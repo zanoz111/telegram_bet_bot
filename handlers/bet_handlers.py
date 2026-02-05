@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes
 from database.db import (
     create_bet, update_bet_step2, update_bet_step3, get_bet, 
     get_active_bets, get_bets_last_24h, take_bet, set_bet_result,
-    cancel_bet, update_bet_name
+    cancel_bet, update_bet_name, change_bet_result
 )
 from models.bet import Bet, STATUS_DRAFT, STATUS_OPEN, STATUS_TAKEN
 from config import is_allowed_player, get_other_player, get_taker_user_id, PLAYER_INZAAA_USERNAME, PLAYER_TROOLZ_USERNAME
@@ -17,6 +17,52 @@ from datetime import datetime
 
 # Хранилище временных данных для визарда
 user_states = {}  # {user_id: {'action': 'step0'|'step1'|'step2'|'step3', 'bet_id': int, 'bet_name': str, 'playerA': str, 'playerB': str, 'oddsA': float, 'oddsB': float, 'message_id': int}}
+
+
+def format_money(amount, signed=False):
+    """Форматирование суммы без копеек"""
+    if signed:
+        return f"{amount:+.0f} ₽"
+    return f"{amount:.0f} ₽"
+
+
+def build_player_keyboard(selected_player=None):
+    """Создание клавиатуры выбора игроков с подсветкой выбранного"""
+    keyboard = []
+    for i in range(0, len(PLAYERS), 2):
+        row = []
+        name = PLAYERS[i]
+        label = f"✅ {name}" if name == selected_player else name
+        row.append(InlineKeyboardButton(label, callback_data=f"player_{name}"))
+        if i + 1 < len(PLAYERS):
+            name2 = PLAYERS[i + 1]
+            label2 = f"✅ {name2}" if name2 == selected_player else name2
+            row.append(InlineKeyboardButton(label2, callback_data=f"player_{name2}"))
+        keyboard.append(row)
+    return keyboard
+
+
+def build_odds_keyboard(bet_id, playerA, playerB, selected_player=None):
+    """Клавиатура выбора игрока и процента для шага 2"""
+    keyboard = []
+    
+    # Кнопки выбора игрока
+    labelA = f"✅ {playerA}" if selected_player == 'A' else playerA
+    labelB = f"✅ {playerB}" if selected_player == 'B' else playerB
+    keyboard.append([
+        InlineKeyboardButton(labelA, callback_data=f"op_{bet_id}_A"),
+        InlineKeyboardButton(labelB, callback_data=f"op_{bet_id}_B")
+    ])
+    
+    # Кнопки процентов (шаг 5)
+    percentages = list(range(5, 100, 5))  # 5, 10, 15, ... 95
+    for i in range(0, len(percentages), 5):
+        row = []
+        for pct in percentages[i:i+5]:
+            row.append(InlineKeyboardButton(f"{pct}%", callback_data=f"opct_{bet_id}_{pct}"))
+        keyboard.append(row)
+    
+    return keyboard
 
 
 async def create_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,15 +140,8 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except:
             pass
         
-        # Создаем кнопки с игроками (по 2 в ряд)
-        keyboard = []
-        for i in range(0, len(PLAYERS), 2):
-            row = []
-            row.append(InlineKeyboardButton(PLAYERS[i], callback_data=f"player_{PLAYERS[i]}"))
-            if i + 1 < len(PLAYERS):
-                row.append(InlineKeyboardButton(PLAYERS[i + 1], callback_data=f"player_{PLAYERS[i + 1]}"))
-            keyboard.append(row)
-        
+        # Создаем кнопки с игроками
+        keyboard = build_player_keyboard()
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         # Переходим к шагу 1 - выбор матча
@@ -144,14 +183,7 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         if not match:
             # Воссоздаем кнопки с игроками
-            keyboard = []
-            for i in range(0, len(PLAYERS), 2):
-                row = []
-                row.append(InlineKeyboardButton(PLAYERS[i], callback_data=f"player_{PLAYERS[i]}"))
-                if i + 1 < len(PLAYERS):
-                    row.append(InlineKeyboardButton(PLAYERS[i + 1], callback_data=f"player_{PLAYERS[i + 1]}"))
-                keyboard.append(row)
-            
+            keyboard = build_player_keyboard()
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await context.bot.edit_message_text(
@@ -190,6 +222,10 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         bet_id = create_bet(new_bet)
         
+        # Клавиатура выбора игрока + процент
+        keyboard = build_odds_keyboard(bet_id, playerA, playerB)
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         # Обновляем сообщение для шага 2
         msg = await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -197,13 +233,10 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text=f"Шаг 2/4 — Проценты и коэффициенты\n\n"
                  f"Название: {state.get('bet_name')}\n"
                  f"Матч: {playerA} vs {playerB}\n\n"
-                 f"Введи вероятность победы одного из игроков в формате:\n"
-                 f"`Имя_игрока процент`\n\n"
-                 f"Пример:\n"
-                 f"`{playerA} 60` — {playerA} побеждает с вероятностью 60%\n\n"
-                 f"Второму игроку автоматически присвоится {100}%\n"
-                 f"Коэффициенты будут рассчитаны автоматически.",
-            parse_mode='Markdown'
+                 f"Выбери игрока и его процент на победу:\n"
+                 f"Или введи вручную: `{playerA} 60`",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
         )
         
         user_states[user.id] = {
@@ -212,7 +245,8 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             'bet_name': state.get('bet_name'),
             'playerA': playerA,
             'playerB': playerB,
-            'message_id': msg.message_id
+            'message_id': msg.message_id,
+            'selected_odds_player': None
         }
     
     elif state['action'] == 'step2' or state['action'] == 'edit_step2':
@@ -231,13 +265,16 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         match = re.match(percent_pattern, text.strip())
         
         if not match:
+            keyboard = build_odds_keyboard(state['bet_id'], state['playerA'], state['playerB'], state.get('selected_odds_player'))
+            reply_markup = InlineKeyboardMarkup(keyboard)
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=state.get('message_id'),
                 text="❌ Неверный формат! Введи имя игрока и процент:\n"
                      f"`{state['playerA']} процент` или `{state['playerB']} процент`\n\n"
                      f"Пример: `{state['playerA']} 60`",
-                parse_mode='Markdown'
+                parse_mode='Markdown',
+                reply_markup=reply_markup
             )
             return
         
@@ -301,8 +338,8 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                      f"Название: {state.get('bet_name')}\n"
                      f"Матч: {state['playerA']} vs {state['playerB']}\n\n"
                      f"Проценты и коэффициенты:\n"
-                     f"{state['playerA']:15} — {percentA:.0f}% → {oddsA:.2f}\n"
-                     f"{state['playerB']:15} — {percentB:.0f}% → {oddsB:.2f}\n\n"
+                     f"{state['playerA']} — {percentA:.0f}% → `{oddsA:.2f}`\n"
+                     f"{state['playerB']} — {percentB:.0f}% → `{oddsB:.2f}`\n\n"
                      f"Введи сумму ставки (₽) или выбери из кнопок:",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
@@ -377,7 +414,10 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
             keyboard = [
                 [
-                    InlineKeyboardButton("✅ Выбрать сторону", callback_data=f"take_{bet.id}"),
+                    InlineKeyboardButton(f"🟢 За {bet.playerA_name} ({bet.oddsA:.2f})", callback_data=f"side_{bet.id}_A"),
+                ],
+                [
+                    InlineKeyboardButton(f"🔵 За {bet.playerB_name} ({bet.oddsB:.2f})", callback_data=f"side_{bet.id}_B"),
                 ],
                 [
                     InlineKeyboardButton("✏️ Изменить", callback_data=f"edit_{bet.id}"),
@@ -385,7 +425,6 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 ]
             ]
             
-            # Кнопки доступны только для maker и taker
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await context.bot.edit_message_text(
@@ -418,43 +457,43 @@ def format_bet_card(bet: Bet) -> str:
         'CANCELED': '❌'
     }.get(bet.status, '❓')
     
-    text = f"{status_emoji} Пари #{bet.id}\n\n"
-    
+    # Заголовок с форматом матча
+    header = f"{status_emoji} Пари #{bet.id}"
     if bet.bet_name:
-        text += f"Название: {bet.bet_name}\n"
+        header += f" • {bet.bet_name}"
+    text = header + "\n\n"
     
-    text += f"Матч: {bet.playerA_name} vs {bet.playerB_name}\n"
-    
+    # Игроки с кэфами и бэкерами
     if bet.oddsA and bet.oddsB:
-        text += f"Кэфы: {bet.playerA_name} — {bet.oddsA:.2f} | {bet.playerB_name} — {bet.oddsB:.2f}\n"
+        if bet.taker_side:
+            # Показываем кто на какой стороне прямо на кэфах
+            playerA_backer = bet.taker_username if bet.taker_side == 'A' else bet.maker_username
+            playerB_backer = bet.taker_username if bet.taker_side == 'B' else bet.maker_username
+            text += f"{bet.playerA_name} — `{bet.oddsA:.2f}` ({playerA_backer}) | {bet.playerB_name} — `{bet.oddsB:.2f}` ({playerB_backer})\n"
+        else:
+            text += f"{bet.playerA_name} — `{bet.oddsA:.2f}` | {bet.playerB_name} — `{bet.oddsB:.2f}`\n"
+    else:
+        text += f"{bet.playerA_name} vs {bet.playerB_name}\n"
     
     if bet.stake:
-        text += f"Сумма: {bet.stake:.2f} ₽\n"
+        text += f"Сумма: {format_money(bet.stake)}\n"
     
-    text += f"\nMaker: @{bet.maker_username}\n"
-    text += f"Статус: {bet.status}\n"
+    # Создатель (без тега — тегаем только когда нужно действие)
+    text += f"\nСоздал: {bet.maker_username}\n"
     
     if bet.status == 'OPEN':
-        text += f"\n👉 @{bet.taker_username}, тебе нужно выбрать сторону"
+        # Тегаем только taker — ему нужно действовать
+        text += f"\n👉 @{bet.taker_username}, выбери сторону"
     elif bet.status == 'TAKEN':
-        text += f"\nПринял: @{bet.taker_username}\n"
-        text += f"Выбранная сторона: {bet.playerA_name if bet.taker_side == 'A' else bet.playerB_name}\n"
-        text += f"Статус: TAKEN (ожидает результат)"
+        text += f"\nОжидает результат"
     elif bet.status == 'FINISHED':
         result_text = bet.playerA_name if bet.result == 'A' else (bet.playerB_name if bet.result == 'B' else 'VOID')
         
-        # Определяем, кто на какую сторону поставил
-        taker_choice = bet.playerA_name if bet.taker_side == 'A' else bet.playerB_name
-        maker_choice = bet.playerB_name if bet.taker_side == 'A' else bet.playerA_name
-        
         text += f"\n✅ Пари завершено\n"
         text += f"Победил: {result_text}\n\n"
-        text += f"Ставки:\n"
-        text += f"@{bet.maker_username} → {maker_choice}\n"
-        text += f"@{bet.taker_username} → {taker_choice}\n\n"
         text += f"Итог:\n"
-        text += f"@{bet.maker_username} {bet.maker_win:+.2f} ₽\n"
-        text += f"@{bet.taker_username} {bet.taker_win:+.2f} ₽\n"
+        text += f"{bet.maker_username} {format_money(bet.maker_win, signed=True)}\n"
+        text += f"{bet.taker_username} {format_money(bet.taker_win, signed=True)}\n"
     
     return text
 
@@ -473,15 +512,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Сессия создания пари истекла. Начните заново.", show_alert=True)
             return
         
-        # Создаем кнопки с игроками (по 2 в ряд)
-        keyboard = []
-        for i in range(0, len(PLAYERS), 2):
-            row = []
-            row.append(InlineKeyboardButton(PLAYERS[i], callback_data=f"player_{PLAYERS[i]}"))
-            if i + 1 < len(PLAYERS):
-                row.append(InlineKeyboardButton(PLAYERS[i + 1], callback_data=f"player_{PLAYERS[i + 1]}"))
-            keyboard.append(row)
-        
+        # Создаем кнопки с игроками
+        keyboard = build_player_keyboard()
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         # Переходим к шагу 1
@@ -519,15 +551,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             state['selected_playerA'] = player_name
             await query.answer(f"Выбран первый игрок: {player_name}")
             
-            # Обновляем сообщение
-            keyboard = []
-            for i in range(0, len(PLAYERS), 2):
-                row = []
-                row.append(InlineKeyboardButton(PLAYERS[i], callback_data=f"player_{PLAYERS[i]}"))
-                if i + 1 < len(PLAYERS):
-                    row.append(InlineKeyboardButton(PLAYERS[i + 1], callback_data=f"player_{PLAYERS[i + 1]}"))
-                keyboard.append(row)
-            
+            # Обновляем сообщение — подсвечиваем выбранного игрока
+            keyboard = build_player_keyboard(selected_player=player_name)
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await query.edit_message_text(
@@ -565,18 +590,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             bet_id = create_bet(new_bet)
             
+            # Клавиатура выбора игрока + процент
+            keyboard = build_odds_keyboard(bet_id, playerA, playerB)
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             # Переходим к шагу 2
             msg = await query.edit_message_text(
                 f"Шаг 2/4 — Проценты и коэффициенты\n\n"
                 f"Название: {state.get('bet_name')}\n"
                 f"Матч: {playerA} vs {playerB}\n\n"
-                f"Введи вероятность победы одного из игроков в формате:\n"
-                f"`Имя_игрока процент`\n\n"
-                f"Пример:\n"
-                f"`{playerA} 60` — {playerA} побеждает с вероятностью 60%\n\n"
-                f"Второму игроку автоматически присвоится остаток\n"
-                f"Коэффициенты будут рассчитаны автоматически.",
-                parse_mode='Markdown'
+                f"Выбери игрока и его процент на победу:\n"
+                f"Или введи вручную: `{playerA} 60`",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
             )
             
             user_states[user.id] = {
@@ -585,7 +611,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'bet_name': state.get('bet_name'),
                 'playerA': playerA,
                 'playerB': playerB,
-                'message_id': msg.message_id
+                'message_id': msg.message_id,
+                'selected_odds_player': None
             }
     
     elif data.startswith('menu_'):
@@ -673,6 +700,121 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stake = float(parts[2])
         await handle_stake_selection(update, context, bet_id, stake)
     
+    elif data.startswith('op_'):
+        # Выбор игрока для процента на шаге 2
+        await query.answer()
+        parts = data.split('_')
+        bet_id = int(parts[1])
+        side = parts[2]  # 'A' or 'B'
+        
+        if user.id not in user_states or user_states[user.id]['action'] not in ('step2', 'edit_step2'):
+            await query.answer("❌ Сессия создания пари истекла", show_alert=True)
+            return
+        
+        state = user_states[user.id]
+        state['selected_odds_player'] = side
+        
+        # Перестраиваем клавиатуру с подсветкой выбранного игрока
+        keyboard = build_odds_keyboard(bet_id, state['playerA'], state['playerB'], selected_player=side)
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        selected_name = state['playerA'] if side == 'A' else state['playerB']
+        
+        await query.edit_message_text(
+            f"Шаг 2/4 — Проценты и коэффициенты\n\n"
+            f"Название: {state.get('bet_name')}\n"
+            f"Матч: {state['playerA']} vs {state['playerB']}\n\n"
+            f"Выбран: *{selected_name}*\n"
+            f"Выбери процент на победу или введи вручную: `{selected_name} 60`",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    
+    elif data.startswith('opct_'):
+        # Выбор процента для выбранного игрока на шаге 2
+        parts = data.split('_')
+        bet_id = int(parts[1])
+        pct = int(parts[2])
+        
+        if user.id not in user_states or user_states[user.id]['action'] not in ('step2', 'edit_step2'):
+            await query.answer("❌ Сессия создания пари истекла", show_alert=True)
+            return
+        
+        state = user_states[user.id]
+        
+        if not state.get('selected_odds_player'):
+            await query.answer("⚠️ Сначала выбери игрока!", show_alert=True)
+            return
+        
+        await query.answer()
+        
+        # Рассчитываем проценты и коэффициенты
+        selected_side = state['selected_odds_player']
+        if selected_side == 'A':
+            percentA = pct
+            percentB = 100 - pct
+        else:
+            percentB = pct
+            percentA = 100 - pct
+        
+        oddsA = round(100 / percentA, 2)
+        oddsB = round(100 / percentB, 2)
+        
+        # Обновляем в БД
+        update_bet_step2(state['bet_id'], oddsA, oddsB)
+        
+        # Клавиатура шага 3
+        keyboard = [
+            [
+                InlineKeyboardButton("500 ₽", callback_data=f"stake_{state['bet_id']}_500"),
+                InlineKeyboardButton("1000 ₽", callback_data=f"stake_{state['bet_id']}_1000")
+            ],
+            [
+                InlineKeyboardButton("1500 ₽", callback_data=f"stake_{state['bet_id']}_1500"),
+                InlineKeyboardButton("2000 ₽", callback_data=f"stake_{state['bet_id']}_2000")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        msg = await query.edit_message_text(
+            f"Шаг 3/4 — Сумма ставки\n\n"
+            f"Название: {state.get('bet_name')}\n"
+            f"{state['playerA']} — {percentA:.0f}% → `{oddsA:.2f}`\n"
+            f"{state['playerB']} — {percentB:.0f}% → `{oddsB:.2f}`\n\n"
+            f"Введи сумму ставки (₽) или выбери из кнопок:",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        
+        next_action = 'edit_step3' if state['action'] == 'edit_step2' else 'step3'
+        
+        user_states[user.id] = {
+            'action': next_action,
+            'bet_id': state['bet_id'],
+            'bet_name': state.get('bet_name'),
+            'playerA': state['playerA'],
+            'playerB': state['playerB'],
+            'oddsA': oddsA,
+            'oddsB': oddsB,
+            'percentA': percentA,
+            'percentB': percentB,
+            'message_id': msg.message_id
+        }
+    
+    elif data.startswith('chresult_menu_'):
+        # Меню изменения результата
+        await query.answer()
+        bet_id = int(data.split('_')[2])
+        await show_change_result_menu(update, context, bet_id)
+    
+    elif data.startswith('chresult_'):
+        # Изменение результата
+        await query.answer()
+        parts = data.split('_')
+        bet_id = int(parts[1])
+        new_result = parts[2]
+        await handle_change_result(update, context, bet_id, new_result)
+    
     elif data.startswith('edit_'):
         # Редактирование пари
         bet_id = int(data.split('_')[1])
@@ -725,8 +867,8 @@ async def handle_take_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, be
     await query.edit_message_text(
         f"Выбери сторону для ставки:\n\n"
         f"*{bet.playerA_name}* vs *{bet.playerB_name}*\n"
-        f"Коэффициенты: {bet.oddsA:.2f} / {bet.oddsB:.2f}\n"
-        f"Сумма: {bet.stake:.2f} ₽",
+        f"Коэффициенты: `{bet.oddsA:.2f}` / `{bet.oddsB:.2f}`\n"
+        f"Сумма: {format_money(bet.stake)}",
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
@@ -898,8 +1040,8 @@ async def show_statistics_by_period(update: Update, context: ContextTypes.DEFAUL
         text += f"С {start_date.strftime('%d.%m.%Y')} по {now.strftime('%d.%m.%Y')}\n\n"
     
     for username, user_stats in stats.items():
-        text += f"*@{username}*\n"
-        text += f"Баланс: {user_stats['total_balance']:.2f} ₽\n"
+        text += f"*{username}*\n"
+        text += f"Баланс: {format_money(user_stats['total_balance'], signed=True)}\n"
         text += f"Пари: {user_stats['total_bets']}\n"
         text += f"Победы: {user_stats['wins']} | Поражения: {user_stats['losses']}\n\n"
     
@@ -950,7 +1092,8 @@ async def handle_edit_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, be
         'bet_name': bet.bet_name,
         'playerA': bet.playerA_name,
         'playerB': bet.playerB_name,
-        'message_id': query.message.message_id
+        'message_id': query.message.message_id,
+        'selected_odds_player': None
     }
     
     # Показываем шаг 2 - редактирование коэффициентов
@@ -960,19 +1103,20 @@ async def handle_edit_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, be
     current_percentA = round(100 / bet.oddsA, 1) if bet.oddsA else 50
     current_percentB = round(100 / bet.oddsB, 1) if bet.oddsB else 50
     
+    # Кнопки выбора игрока + процент
+    keyboard = build_odds_keyboard(bet_id, bet.playerA_name, bet.playerB_name)
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await query.edit_message_text(
         f"✏️ Редактирование пари #{bet_id}\n\n"
-        f"Шаг 2/4 — Проценты и коэффициенты\n\n"
         f"{bet_name_text}"
         f"Матч: {bet.playerA_name} vs {bet.playerB_name}\n\n"
         f"Текущие значения:\n"
-        f"{bet.playerA_name} — {current_percentA:.0f}% → {bet.oddsA:.2f}\n"
-        f"{bet.playerB_name} — {current_percentB:.0f}% → {bet.oddsB:.2f}\n\n"
-        f"Введи новую вероятность победы в формате:\n"
-        f"`Имя_игрока процент`\n\n"
-        f"Пример:\n"
-        f"`{bet.playerA_name} 60`",
-        parse_mode='Markdown'
+        f"{bet.playerA_name} — {current_percentA:.0f}% → `{bet.oddsA:.2f}`\n"
+        f"{bet.playerB_name} — {current_percentB:.0f}% → `{bet.oddsB:.2f}`\n\n"
+        f"Выбери игрока и процент или введи вручную: `{bet.playerA_name} 60`",
+        parse_mode='Markdown',
+        reply_markup=reply_markup
     )
 
 
@@ -1023,7 +1167,10 @@ async def handle_stake_selection(update: Update, context: ContextTypes.DEFAULT_T
     
     keyboard = [
         [
-            InlineKeyboardButton("✅ Выбрать сторону", callback_data=f"take_{bet.id}"),
+            InlineKeyboardButton(f"🟢 За {bet.playerA_name} ({bet.oddsA:.2f})", callback_data=f"side_{bet.id}_A"),
+        ],
+        [
+            InlineKeyboardButton(f"🔵 За {bet.playerB_name} ({bet.oddsB:.2f})", callback_data=f"side_{bet.id}_B"),
         ],
         [
             InlineKeyboardButton("✏️ Изменить", callback_data=f"edit_{bet.id}"),
@@ -1031,7 +1178,6 @@ async def handle_stake_selection(update: Update, context: ContextTypes.DEFAULT_T
         ]
     ]
     
-    # Кнопки доступны только для maker и taker
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
@@ -1085,22 +1231,18 @@ async def view_active_bets_handler(update: Update, context: ContextTypes.DEFAULT
     text = "📌 *Актуальные пари:*\n\n"
     
     for bet in active_bets:
-        text += f"#{bet.id} — {bet.playerA_name} vs {bet.playerB_name}\n"
+        bet_name_text = f" • {bet.bet_name}" if bet.bet_name else ""
+        text += f"#{bet.id}{bet_name_text} — {bet.playerA_name} `{bet.oddsA:.2f}` | {bet.playerB_name} `{bet.oddsB:.2f}`\n"
+        text += f"Сумма: {format_money(bet.stake)}\n"
         
         # Для TAKEN пари показываем детали
         if bet.status == 'TAKEN':
-            # Определяем, кто на какую сторону поставил
             taker_choice = bet.playerA_name if bet.taker_side == 'A' else bet.playerB_name
             maker_choice = bet.playerB_name if bet.taker_side == 'A' else bet.playerA_name
             
-            text += f"Кэфы: {bet.playerA_name} {bet.oddsA:.2f} | {bet.playerB_name} {bet.oddsB:.2f}\n"
-            text += f"Сумма: {bet.stake:.2f} ₽\n"
-            text += f"Ставки: @{bet.maker_username} → {maker_choice} | @{bet.taker_username} → {taker_choice}\n"
-            text += f"Статус: TAKEN (ожидает результат)\n\n"
+            text += f"Ставки: {bet.maker_username} → {maker_choice} | {bet.taker_username} → {taker_choice}\n"
+            text += f"Ожидает результат\n\n"
         else:
-            # Для OPEN пари показываем только коэффициенты и сумму
-            text += f"Кэфы: {bet.playerA_name} {bet.oddsA:.2f} | {bet.playerB_name} {bet.oddsB:.2f}\n"
-            text += f"Сумма: {bet.stake:.2f} ₽\n"
             text += f"Статус: {bet.status}\n\n"
     
     keyboard = []
@@ -1112,18 +1254,16 @@ async def view_active_bets_handler(update: Update, context: ContextTypes.DEFAULT
                 InlineKeyboardButton(f"🏁 Результат #{bet.id}", callback_data=f"result_menu_{bet.id}")
             ])
         elif bet.status == 'OPEN':
-            # Проверяем, является ли пользователь taker или maker
-            row = []
-            
+            # Кнопки выбора стороны для taker
             if user.username and user.username.lower() == bet.taker_username.lower():
-                row.append(InlineKeyboardButton(f"✅ Выбрать сторону #{bet.id}", callback_data=f"take_{bet.id}"))
+                keyboard.append([
+                    InlineKeyboardButton(f"🟢 {bet.playerA_name} #{bet.id}", callback_data=f"side_{bet.id}_A"),
+                    InlineKeyboardButton(f"🔵 {bet.playerB_name} #{bet.id}", callback_data=f"side_{bet.id}_B")
+                ])
             
-            # Добавляем кнопку отмены для maker
+            # Кнопка отмены для maker
             if user.username and user.username.lower() == bet.maker_username.lower():
-                row.append(InlineKeyboardButton(f"🗑 Отменить #{bet.id}", callback_data=f"cancel_{bet.id}"))
-            
-            if row:
-                keyboard.append(row)
+                keyboard.append([InlineKeyboardButton(f"🗑 Отменить #{bet.id}", callback_data=f"cancel_{bet.id}")])
     
     if not keyboard:
         keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="menu_back")]]
@@ -1133,9 +1273,9 @@ async def view_active_bets_handler(update: Update, context: ContextTypes.DEFAULT
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     else:
-        await update.message.reply_text(text, reply_markup=reply_markup)
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
 
 async def view_bets_24h_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1148,16 +1288,22 @@ async def view_bets_24h_handler(update: Update, context: ContextTypes.DEFAULT_TY
         for bet in bets:
             result_text = bet.playerA_name if bet.result == 'A' else (bet.playerB_name if bet.result == 'B' else 'VOID')
             
-            # Определяем, кто на какую сторону поставил
             taker_choice = bet.playerA_name if bet.taker_side == 'A' else bet.playerB_name
             maker_choice = bet.playerB_name if bet.taker_side == 'A' else bet.playerA_name
             
-            text += f"#{bet.id} — {bet.playerA_name} vs {bet.playerB_name}\n"
+            bet_name_text = f" • {bet.bet_name}" if bet.bet_name else ""
+            text += f"#{bet.id}{bet_name_text} — {bet.playerA_name} `{bet.oddsA:.2f}` | {bet.playerB_name} `{bet.oddsB:.2f}`\n"
             text += f"Результат: {result_text}\n"
-            text += f"Ставки: @{bet.maker_username} → {maker_choice} | @{bet.taker_username} → {taker_choice}\n"
-            text += f"@{bet.maker_username} {bet.maker_win:+.2f} ₽ | @{bet.taker_username} {bet.taker_win:+.2f} ₽\n\n"
+            text += f"Ставки: {bet.maker_username} → {maker_choice} | {bet.taker_username} → {taker_choice}\n"
+            text += f"{bet.maker_username} {format_money(bet.maker_win, signed=True)} | {bet.taker_username} {format_money(bet.taker_win, signed=True)}\n\n"
     
-    keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="menu_back")]]
+    keyboard = []
+    if bets:
+        for bet in bets:
+            keyboard.append([
+                InlineKeyboardButton(f"🔄 Изменить результат #{bet.id}", callback_data=f"chresult_menu_{bet.id}")
+            ])
+    keyboard.append([InlineKeyboardButton("🔙 Главное меню", callback_data="menu_back")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.callback_query:
@@ -1178,8 +1324,8 @@ async def show_statistics_handler(update: Update, context: ContextTypes.DEFAULT_
     text += "Период: Все время\n\n"
     
     for username, user_stats in stats.items():
-        text += f"*@{username}*\n"
-        text += f"Баланс: {user_stats['total_balance']:.2f} ₽\n"
+        text += f"*{username}*\n"
+        text += f"Баланс: {format_money(user_stats['total_balance'], signed=True)}\n"
         text += f"Пари: {user_stats['total_bets']}\n"
         text += f"Победы: {user_stats['wins']} | Поражения: {user_stats['losses']}\n\n"
     
@@ -1226,3 +1372,63 @@ async def reset_statistics_handler(update: Update, context: ContextTypes.DEFAULT
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
+
+
+async def show_change_result_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, bet_id: int):
+    """Показ меню изменения результата завершенного пари"""
+    query = update.callback_query
+    
+    bet = get_bet(bet_id)
+    if not bet:
+        await query.edit_message_text("❌ Пари не найдено!")
+        return
+    
+    if bet.status != 'FINISHED':
+        await query.answer("❌ Можно изменить результат только завершенного пари", show_alert=True)
+        return
+    
+    current_result = bet.playerA_name if bet.result == 'A' else (bet.playerB_name if bet.result == 'B' else 'VOID')
+    
+    keyboard = [
+        [InlineKeyboardButton(f"🏆 {bet.playerA_name}", callback_data=f"chresult_{bet_id}_A")],
+        [InlineKeyboardButton(f"🏆 {bet.playerB_name}", callback_data=f"chresult_{bet_id}_B")],
+        [InlineKeyboardButton("🚫 VOID", callback_data=f"chresult_{bet_id}_VOID")],
+        [InlineKeyboardButton("🔙 Назад к пари за сутки", callback_data="menu_bets_24h")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"🔄 *Изменить результат пари #{bet_id}*\n\n"
+        f"{bet.playerA_name} vs {bet.playerB_name}\n"
+        f"Текущий результат: *{current_result}*\n\n"
+        f"Выбери новый результат:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+
+async def handle_change_result(update: Update, context: ContextTypes.DEFAULT_TYPE, bet_id: int, new_result: str):
+    """Обработка изменения результата с пересчетом статистики"""
+    query = update.callback_query
+    user = update.effective_user
+    
+    # Проверка доступа
+    if not is_allowed_player(user.username):
+        await query.answer("❌ Только игроки могут изменять результат", show_alert=True)
+        return
+    
+    bet = get_bet(bet_id)
+    if not bet:
+        await query.edit_message_text("❌ Пари не найдено!")
+        return
+    
+    # Изменяем результат с пересчетом
+    change_bet_result(bet_id, new_result)
+    
+    bet = get_bet(bet_id)
+    result_text = bet.playerA_name if bet.result == 'A' else (bet.playerB_name if bet.result == 'B' else 'VOID')
+    
+    await query.answer(f"✅ Результат изменен: {result_text}", show_alert=True)
+    
+    # Возвращаемся к списку пари за сутки
+    await view_bets_24h_handler(update, context)

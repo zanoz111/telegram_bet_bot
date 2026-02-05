@@ -283,6 +283,66 @@ def set_bet_result(bet_id: int, result: str):
     conn.close()
 
 
+def change_bet_result(bet_id: int, new_result: str):
+    """Изменение результата пари с пересчетом статистики"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT * FROM bets WHERE id = ?', (bet_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return
+    
+    bet = Bet.from_dict(dict(row))
+    
+    if not bet.taker_side or not bet.stake:
+        conn.close()
+        return
+    
+    # Удаляем старые ledger записи для этого пари
+    cursor.execute('DELETE FROM ledger WHERE bet_id = ?', (bet_id,))
+    
+    # Пересчитываем выигрыши
+    S = bet.stake
+    O = bet.oddsA if bet.taker_side == 'A' else bet.oddsB
+    
+    maker_win = 0.0
+    taker_win = 0.0
+    
+    if new_result == 'VOID':
+        maker_win = 0.0
+        taker_win = 0.0
+    elif new_result == bet.taker_side:
+        taker_win = S * (O - 1)
+        maker_win = -S * (O - 1)
+    else:
+        taker_win = -S
+        maker_win = S
+    
+    finished_at = datetime.now()
+    
+    cursor.execute('''
+        UPDATE bets 
+        SET result = ?, maker_win = ?, taker_win = ?, finished_at = ?
+        WHERE id = ?
+    ''', (new_result, maker_win, taker_win, finished_at.isoformat(), bet_id))
+    
+    # Создаем новые записи в ledger
+    cursor.execute('''
+        INSERT INTO ledger (bet_id, user_id, username, amount, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (bet_id, bet.maker_user_id, bet.maker_username, maker_win, finished_at.isoformat()))
+    
+    cursor.execute('''
+        INSERT INTO ledger (bet_id, user_id, username, amount, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (bet_id, bet.taker_user_id, bet.taker_username, taker_win, finished_at.isoformat()))
+    
+    conn.commit()
+    conn.close()
+
+
 def cancel_bet(bet_id: int):
     """Отмена пари"""
     conn = get_connection()

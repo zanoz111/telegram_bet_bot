@@ -13,7 +13,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = f"""
 Привет, {user.first_name}! 👋
 
-Это бот для пари между @Inzaaa и @TROOLZ.
+Это бот для пари между Inzaaa и TROOLZ.
 
 📋 *Как это работает:*
 
