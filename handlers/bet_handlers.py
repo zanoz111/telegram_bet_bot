@@ -225,7 +225,6 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Клавиатура выбора игрока + процент
         keyboard = build_odds_keyboard(bet_id, playerA, playerB)
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
         # Обновляем сообщение для шага 2
         msg = await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -424,7 +423,6 @@ async def bet_wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     InlineKeyboardButton("🗑 Отменить", callback_data=f"cancel_{bet.id}")
                 ]
             ]
-            
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await context.bot.edit_message_text(
@@ -593,7 +591,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Клавиатура выбора игрока + процент
             keyboard = build_odds_keyboard(bet_id, playerA, playerB)
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
             # Переходим к шагу 2
             msg = await query.edit_message_text(
                 f"Шаг 2/4 — Проценты и коэффициенты\n\n"
@@ -669,6 +666,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bet_id = int(parts[1])
         result = parts[2]  # 'A', 'B', 'VOID'
         await handle_set_result(update, context, bet_id, result)
+    
+    elif data.startswith('noop_'):
+        # Кнопка-заголовок, ничего не делает
+        await query.answer()
+        return
     
     elif data == 'reset_confirm':
         # Подтверждение сброса статистики
@@ -1250,20 +1252,25 @@ async def view_active_bets_handler(update: Update, context: ContextTypes.DEFAULT
     
     for bet in active_bets:
         if bet.status == 'TAKEN':
+            bet_name_btn = f" • {bet.bet_name}" if bet.bet_name else ""
             keyboard.append([
-                InlineKeyboardButton(f"🏁 Результат #{bet.id}", callback_data=f"result_menu_{bet.id}")
+                InlineKeyboardButton(f"🏁 Результат #{bet.id}{bet_name_btn}", callback_data=f"result_menu_{bet.id}")
             ])
         elif bet.status == 'OPEN':
+            bet_name_lbl = f" • {bet.bet_name}" if bet.bet_name else ""
             # Кнопки выбора стороны для taker
             if user.username and user.username.lower() == bet.taker_username.lower():
                 keyboard.append([
-                    InlineKeyboardButton(f"🟢 {bet.playerA_name} #{bet.id}", callback_data=f"side_{bet.id}_A"),
-                    InlineKeyboardButton(f"🔵 {bet.playerB_name} #{bet.id}", callback_data=f"side_{bet.id}_B")
+                    InlineKeyboardButton(f"── #{bet.id}{bet_name_lbl} выбери сторону ──", callback_data=f"noop_{bet.id}")
+                ])
+                keyboard.append([
+                    InlineKeyboardButton(f"🟢 {bet.playerA_name} ({bet.oddsA:.2f})", callback_data=f"side_{bet.id}_A"),
+                    InlineKeyboardButton(f"🔵 {bet.playerB_name} ({bet.oddsB:.2f})", callback_data=f"side_{bet.id}_B")
                 ])
             
             # Кнопка отмены для maker
             if user.username and user.username.lower() == bet.maker_username.lower():
-                keyboard.append([InlineKeyboardButton(f"🗑 Отменить #{bet.id}", callback_data=f"cancel_{bet.id}")])
+                keyboard.append([InlineKeyboardButton(f"🗑 Отменить #{bet.id}{bet_name_lbl}", callback_data=f"cancel_{bet.id}")])
     
     if not keyboard:
         keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="menu_back")]]
