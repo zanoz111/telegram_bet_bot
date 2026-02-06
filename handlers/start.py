@@ -35,6 +35,9 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("♻️ Сброс статистики", callback_data="menu_reset_stats")
+        ],
+        [
+            InlineKeyboardButton("🐕 Пнуть пса", callback_data="menu_kick_dog")
         ]
     ]
     
